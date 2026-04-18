@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <title>2026 雲端多人同步手帳</title>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getDatabase, ref, set, onValue, push } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+        // ⚠️ 請在此處替換為你的 Firebase 專案設定
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT.firebaseapp.com",
+            databaseURL: "https://YOUR_PROJECT.firebaseio.com",
+            projectId: "YOUR_PROJECT",
+            storageBucket: "YOUR_PROJECT.appspot.com",
+            messagingSenderId: "...",
+            appId: "..."
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+        window.db = db; 
+        window.dbRef = ref;
+        window.dbOnValue = onValue;
+        window.dbSet = set;
+        window.dbPush = push;
+    </script>
+
+    <style>
+        /* 介面核心樣式 */
+        :root { 
+            --primary: #2c3e50; --accent: #e74c3c; --bg: #ecf0f1; 
+            --color-normal: #e3f2fd; --text-normal: #1976d2;
+            --color-important: #fff3e0; --text-important: #e65100;
+            --color-urgent: #ffebee; --text-urgent: #c62828;
+        }
+        body { font-family: 'PingFang TC', 'Microsoft JhengHei', sans-serif; background: var(--bg); padding: 20px; margin: 0; }
+        .calendar-app { max-width: 900px; margin: auto; background: white; border-radius: 15px; box-shadow: 0 12px 30px rgba(0,0,0,0.1); overflow: hidden; }
+        
+        /* 導覽列 */
+        .nav-header { background: var(--primary); color: white; padding: 20px; display: flex; justify-content: space-between; align-items: center; }
+        .btn { background: rgba(255,255,255,0.2); border: none; color: white; padding: 8px 15px; border-radius: 5px; cursor: pointer; transition: 0.3s; }
+        .btn:hover { background: rgba(255,255,255,0.3); }
+        
+        /* 月曆網格 */
+        .grid { display: grid; grid-template-columns: repeat(7, 1fr); background: #dfe6e9; gap: 1px; }
+        .day-header { background: #f8f9fa; padding: 12px; text-align: center; font-weight: bold; color: #636e72; }
+        .cell { background: white; min-height: 120px; padding: 10px; cursor: pointer; position: relative; transition: 0.2s; box-sizing: border-box; }
+        .cell:hover { background: #f1f2f6; }
+        
+        /* 狀態與標籤 */
+        .today { background: #fff9db !important; border: 2px solid #f1c40f !important; }
+        .holiday strong { color: var(--accent); }
+        .event { font-size: 11px; padding: 3px 6px; border-radius: 4px; margin-top: 4px; border-left: 3px solid; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .event-normal { background: var(--color-normal); color: var(--text-normal); border-left-color: #2196f3; }
+        .event-important { background: var(--color-important); color: var(--text-important); border-left-color: #ff9800; }
+        .event-urgent { background: var(--color-urgent); color: var(--text-urgent); border-left-color: #f44336; }
+
+        /* 彈出視窗樣式 */
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); justify-content: center; align-items: center; z-index: 1000; }
+        .modal-content { background: white; padding: 25px; border-radius: 12px; width: 320px; box-shadow: 0 5px 20px rgba(0,0,0,0.3); }
+        .modal-content h3 { margin-top: 0; color: var(--primary); }
+        input, select { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
+        .modal-btns { display: flex; gap: 10px; margin-top: 10px; }
+        .modal-btns button { flex: 1; padding: 12px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .save-btn { background: var(--primary); color: white; }
+    </style>
+</head>
+<body>
+
+<div class="calendar-app">
+    <div class="nav-header">
+        <button class="btn" onclick="changeMonth(-1)">◀ 上個月</button>
+        <h2 id="monthTitle">2026 年 12 月</h2>
+        <button class="btn" onclick="changeMonth(1)">下個月 ▶</button>
+    </div>
+    <div class="grid" id="calendarGrid">
+        <div class="day-header">日</div><div class="day-header">一</div><div class="day-header">二</div>
+        <div class="day-header">三</div><div class="day-header">四</div><div class="day-header">五</div><div class="day-header">六</div>
+    </div>
+</div>
+
+<div id="eventModal" class="modal">
+    <div class="modal-content">
+        <h3 id="modalDateTitle">新增活動</h3>
+        <input type="text" id="eventInput" placeholder="行程內容...">
+        <select id="eventPriority">
+            <option value="normal">普通 (藍色)</option>
+            <option value="important">重要 (橘色)</option>
+            <option value="urgent">緊急 (紅色)</option>
+        </select>
+        <div class="modal-btns">
+            <button onclick="closeModal()">取消</button>
+            <button class="save-btn" onclick="saveModalEvent()">儲存活動</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let viewDate = new Date(2026, 11, 1); // 預設 2026 年 12 月
+    let currentSelectedDate = '';
+    let globalEvents = {};
+
+    // 監聽雲端資料
+    function listenToCloud() {
+        if (!window.dbRef) return setTimeout(listenToCloud, 500);
+        const eventsRef = window.dbRef(window.db, 'events_2026');
+        window.dbOnValue(eventsRef, (snapshot) => {
+            globalEvents = snapshot.val() || {};
+            renderCalendar(); 
+        });
+    }
+
+    function renderCalendar() {
+        const grid = document.getElementById('calendarGrid');
+        const headers = Array.from(grid.querySelectorAll('.day-header'));
+        grid.innerHTML = '';
+        headers.forEach(h => grid.appendChild(h));
+
+        const year = viewDate.getFullYear();
+        const month = viewDate.getMonth();
+        document.getElementById('monthTitle').innerText = `${year} 年 ${month + 1} 月`;
+
+        // 計算 2026 年曆邏輯
+        const firstDayIdx = new Date(year, month, 1).getDay();
+        const totalDays = new Date(year, month + 1, 0).getDate();
+
+        // 填充月初空白
+        for (let i = 0; i < firstDayIdx; i++) {
+            const emptyCell = document.createElement('div');
+            emptyCell.className = 'cell';
+            emptyCell.style.background = '#f9f9f9';
+            grid.appendChild(emptyCell);
+        }
+
+        // 生成日期格
+        for (let d = 1; d <= totalDays; d++) {
+            const dateStr = `${year}-${month + 1}-${d}`;
+            const cell = document.createElement('div');
+            cell.className = 'cell';
+            
+            // 標註今天
+            const today = new Date();
+            if (year === today.getFullYear() && month === today.getMonth() && d === today.getDate()) {
+                cell.classList.add('today');
+            }
+            // 標註節日
+            if (month === 11 && (d === 25 || d === 31)) cell.classList.add('holiday');
+
+            cell.innerHTML = `<strong>${d}</strong>`;
+
+            // 渲染雲端活動
+            if (globalEvents[dateStr]) {
+                Object.values(globalEvents[dateStr]).forEach(ev => {
+                    const evDiv = document.createElement('div');
+                    evDiv.className = `event event-${ev.level || 'normal'}`;
+                    evDiv.innerText = ev.text;
+                    cell.appendChild(evDiv);
+                });
+            }
+
+            cell.onclick = () => openModal(dateStr);
+            grid.appendChild(cell);
+        }
+    }
+
+    // 彈出式視窗邏輯
+    function openModal(date) {
+        currentSelectedDate = date;
+        document.getElementById('modalDateTitle').innerText = date;
+        document.getElementById('eventInput').value = '';
+        document.getElementById('eventModal').style.display = 'flex';
+    }
+
+    function closeModal() { document.getElementById('eventModal').style.display = 'none'; }
+
+    function saveModalEvent() {
+        const text = document.getElementById('eventInput').value;
+        const level = document.getElementById('eventPriority').value;
+        if (text && window.dbPush) {
+            // 推送到 Firebase 雲端路徑
+            const dateRef = window.dbRef(window.db, `events_2026/${currentSelectedDate}`);
+            window.dbSet(window.dbPush(dateRef), { 
+                text: text, 
+                level: level,
+                timestamp: Date.now() 
+            });
+        }
+        closeModal();
+    }
+
+    function changeMonth(step) {
+        viewDate.setMonth(viewDate.getMonth() + step);
+        renderCalendar();
+    }
+
+    listenToCloud();
+</script>
+</body>
+</html>
